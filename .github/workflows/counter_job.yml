@@ -27,7 +27,7 @@ jobs:
         pip install requests
 
     - name: Run Weather Fetch Script
-      run: python fetch_weather.py
+      run: python counter.py
 
     - name: Deploy to Firebase Hosting
       uses: FirebaseExtended/action-hosting-deploy@v0
