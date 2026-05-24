@@ -26,6 +26,19 @@ jobs:
         python -m pip install --upgrade pip
         pip install requests
         pip install firebase-admin
+    - name: Create Firebase Service Account JSON
+      run: |
+        # GitHub Secrets에 숨겨둔 암호문 문자열을 읽어서 임시 파일로 저장합니다.
+        echo "${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}" > firebase_service_account.json
+
+    - name: Run Weather Fetch Script
+      run: python fetch_weather.py
+
+    - name: Clean up Credentials
+      if: always() # 스크립트가 성공하든 실패하든 무조건 실행
+      run: |
+        # 가상 머신이 종료되기 전에 혹시 모를 흔적을 지우기 위해 비밀키 파일을 삭제합니다.
+        rm -f firebase_service_account.json
 
     - name: Run Weather Fetch Script
       run: python counter.py
