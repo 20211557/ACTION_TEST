@@ -29,7 +29,10 @@ jobs:
     - name: Create Firebase Service Account JSON
       run: |
         # GitHub Secrets에 숨겨둔 암호문 문자열을 읽어서 임시 파일로 저장합니다.
-        echo "${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}" > firebase_service_account.json
+        run: |
+        cat << 'EOF' > firebase_service_account.json
+        ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        EOF
 
     - name: Run Weather Fetch Script
       run: python counter.py
