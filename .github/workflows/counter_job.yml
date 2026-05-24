@@ -43,9 +43,6 @@ jobs:
         # 가상 머신이 종료되기 전에 혹시 모를 흔적을 지우기 위해 비밀키 파일을 삭제합니다.
         rm -f firebase_service_account.json
 
-    - name: Run Weather Fetch Script
-      run: python counter.py
-
     - name: Deploy to Firebase Hosting
       uses: FirebaseExtended/action-hosting-deploy@v0
       with:
