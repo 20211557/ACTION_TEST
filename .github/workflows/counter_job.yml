@@ -32,7 +32,7 @@ jobs:
         echo "${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}" > firebase_service_account.json
 
     - name: Run Weather Fetch Script
-      run: python fetch_weather.py
+      run: python counter.py
 
     - name: Clean up Credentials
       if: always() # 스크립트가 성공하든 실패하든 무조건 실행
