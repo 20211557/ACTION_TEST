@@ -63,19 +63,28 @@ SEASON_START_MD = (6, 1)
 ARCHIVE_API = "https://archive-api.open-meteo.com/v1/archive"
 FORECAST_API = "https://api.open-meteo.com/v1/forecast"
 
-# Open-Meteo가 가끔 느리거나 일시적 504/timeout을 내므로 재시도 + 백오프
-HTTP_TIMEOUT = 60          # 초 (기존 30 → 60)
-HTTP_RETRIES = 4           # 최대 시도 횟수
-HTTP_BACKOFF = 2.0         # 초, 시도마다 ×2
+# Open-Meteo가 가끔 느리거나 일시적 502/504/timeout/429를 내므로 재시도 + 백오프
+HTTP_TIMEOUT = 60          # 초
+HTTP_RETRIES = 3           # 최대 시도 횟수
+HTTP_BACKOFF = 5.0         # 초, 시도마다 지수 증가
 
 
 def _request_with_retry(url, params, verbose=True):
-    """timeout / 5xx 시 지수 백오프로 재시도. 마지막엔 예외 전파."""
+    """timeout / 5xx / 429 시 지수 백오프로 재시도. 429는 Retry-After 헤더 존중."""
     import time
     last_exc = None
     for attempt in range(1, HTTP_RETRIES + 1):
         try:
             r = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
+            # 429 Too Many Requests: Retry-After 헤더가 있으면 그만큼 대기
+            if r.status_code == 429:
+                wait = float(r.headers.get("Retry-After", HTTP_BACKOFF * (2 ** (attempt - 1))))
+                if verbose:
+                    print(f"   ⏳ 429 rate-limit (Retry-After={wait:.0f}s) — 시도 {attempt}/{HTTP_RETRIES}")
+                if attempt == HTTP_RETRIES:
+                    r.raise_for_status()
+                time.sleep(min(wait, 60))    # 최대 60초까지만 대기
+                continue
             if r.status_code >= 500:
                 raise requests.HTTPError(f"{r.status_code} server error", response=r)
             r.raise_for_status()
@@ -588,15 +597,11 @@ def predict_window_series(
     # 2. 모델 (1회 캐시)
     meta, ebm = _load_models()
 
-    # 3. gdd_cum 누적 base — 오늘 이전 표준 조사일까지의 gdd_15 합 (한 번만 계산)
-    if verbose: print("📐 gdd_cum 누적 base 계산 중...")
-    try:
-        past_gdd_sum = compute_gdd_cum(
-            info["lat"], info["lon"], today, todays_gdd_15=0.0, verbose=False,
-        )
-    except Exception as e:
-        if verbose: print(f"   ⚠️ past gdd 계산 실패 → 0 처리: {e}")
-        past_gdd_sum = 0.0
+    # 3. gdd_cum: 추가 API 호출 없이 0으로 근사 (각 pred_date 에서 gdd_15 만 사용)
+    #    → 시즌 누적 적산온도는 daily 배치 운영상 외부 상태로 관리하는 게 적절.
+    #    무리한 ARCHIVE-API 호출은 GitHub Actions IP의 Open-Meteo 무료 한도(429)와
+    #    502/timeout 의 주된 원인이라 제거.
+    past_gdd_sum = 0.0
 
     # 4. 16개 예측 시점 순회
     predictions = []
@@ -851,8 +856,9 @@ def main():
         except Exception as e:
             print(f"❌ [{sido}] 예측 실패: {e}")
 
-        # Open-Meteo rate limit 완화 (지역 사이 짧은 쉬는 시간)
-        time.sleep(1.0)
+        # Open-Meteo rate limit 완화 (지역 사이 쉬는 시간)
+        # GitHub Actions IP가 Open-Meteo 무료 한도를 공유하므로 다소 길게.
+        time.sleep(3.0)
 
     print("\n🚀 모든 일일 배치 작업이 완료되었습니다!")
 
