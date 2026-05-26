@@ -63,6 +63,33 @@ SEASON_START_MD = (6, 1)
 ARCHIVE_API = "https://archive-api.open-meteo.com/v1/archive"
 FORECAST_API = "https://api.open-meteo.com/v1/forecast"
 
+# Open-Meteo가 가끔 느리거나 일시적 504/timeout을 내므로 재시도 + 백오프
+HTTP_TIMEOUT = 60          # 초 (기존 30 → 60)
+HTTP_RETRIES = 4           # 최대 시도 횟수
+HTTP_BACKOFF = 2.0         # 초, 시도마다 ×2
+
+
+def _request_with_retry(url, params, verbose=True):
+    """timeout / 5xx 시 지수 백오프로 재시도. 마지막엔 예외 전파."""
+    import time
+    last_exc = None
+    for attempt in range(1, HTTP_RETRIES + 1):
+        try:
+            r = requests.get(url, params=params, timeout=HTTP_TIMEOUT)
+            if r.status_code >= 500:
+                raise requests.HTTPError(f"{r.status_code} server error", response=r)
+            r.raise_for_status()
+            return r
+        except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as e:
+            last_exc = e
+            if attempt == HTTP_RETRIES:
+                break
+            wait = HTTP_BACKOFF * (2 ** (attempt - 1))
+            if verbose:
+                print(f"   ⏳ Open-Meteo 재시도 {attempt}/{HTTP_RETRIES} (대기 {wait:.0f}s): {e}")
+            time.sleep(wait)
+    raise last_exc
+
 DAILY_VARS = [
     "temperature_2m_max", "temperature_2m_min", "temperature_2m_mean",
     "relative_humidity_2m_mean", "dew_point_2m_mean",
@@ -162,8 +189,7 @@ def fetch_daily_for_target_window(lat, lon, target_date, n_days=16, verbose=True
         }
 
     if verbose: print(f"🌐 {use_api} API → {target_date} ~ {end_date} ({n_days}일)")
-    r = requests.get(url, params=params, timeout=30)
-    r.raise_for_status()
+    r = _request_with_retry(url, params, verbose=verbose)
     d = r.json()["daily"]
     df = _build_daily_df_from_response(d)
     df = df[(df["date"] >= pd.Timestamp(target_date)) &
@@ -183,12 +209,11 @@ def _fetch_tmean_series(lat, lon, start, end, verbose=False):
     archive_end = min(end, today - timedelta(days=7))
     if archive_end >= start:
         try:
-            r = requests.get(ARCHIVE_API, params={
+            r = _request_with_retry(ARCHIVE_API, {
                 "latitude": lat, "longitude": lon,
                 "start_date": start.isoformat(), "end_date": archive_end.isoformat(),
                 "daily": "temperature_2m_mean", "timezone": "auto",
-            }, timeout=30)
-            r.raise_for_status()
+            }, verbose=verbose)
             d = r.json()["daily"]
             df_list.append(pd.DataFrame({"date": pd.to_datetime(d["time"]), "tmean": d["temperature_2m_mean"]}))
         except Exception as e:
@@ -198,12 +223,11 @@ def _fetch_tmean_series(lat, lon, start, end, verbose=False):
         past_days = min(max(0, (today - forecast_start).days), 92)
         forecast_days = min(max(1, (end - today).days + 1), 16)
         try:
-            r = requests.get(FORECAST_API, params={
+            r = _request_with_retry(FORECAST_API, {
                 "latitude": lat, "longitude": lon,
                 "daily": "temperature_2m_mean",
                 "past_days": past_days, "forecast_days": forecast_days, "timezone": "auto",
-            }, timeout=30)
-            r.raise_for_status()
+            }, verbose=verbose)
             d = r.json()["daily"]
             df_list.append(pd.DataFrame({"date": pd.to_datetime(d["time"]), "tmean": d["temperature_2m_mean"]}))
         except Exception as e:
@@ -544,6 +568,7 @@ def init_firebase():
 #  배치: 전국 광역단체별 일일 예측 → Firebase Hosting용 JSON
 # ═══════════════════════════════════════════════════════════════════════
 def main():
+    import time
     init_firebase()
 
     output_dir = os.path.join("public", "regions")
@@ -572,6 +597,9 @@ def main():
                   f"(grade={result['grade']} {result['grade_name']})")
         except Exception as e:
             print(f"❌ [{sido}] 예측 실패: {e}")
+
+        # Open-Meteo rate limit 완화 (지역 사이 짧은 쉬는 시간)
+        time.sleep(1.0)
 
     print("\n🚀 모든 일일 배치 작업이 완료되었습니다!")
 
