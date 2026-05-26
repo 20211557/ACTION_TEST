@@ -1,2 +1,7 @@
 requests
 firebase-admin
+joblib
+numpy
+pandas
+scikit-learn
+interpret
