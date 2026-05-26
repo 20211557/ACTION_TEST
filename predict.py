@@ -158,6 +158,53 @@ def _build_daily_df_from_response(d):
     })
 
 
+def fetch_30day_window(lat, lon, today=None, n_past=14, n_future=15, verbose=True):
+    """
+    today 기준 (n_past + 1 + n_future)일 = 기본 30일 daily 데이터.
+    Open-Meteo FORECAST API 한 번 호출로 과거 + 오늘 + 예보를 모두 받음.
+
+    반환: date 오름차순으로 정렬된 DataFrame (n_past+1+n_future 행).
+    """
+    if today is None:
+        today = date.today()
+
+    # past_days=N → [today-N, ..., today-1], forecast_days=M → [today, ..., today+M-1]
+    past_days = max(0, n_past)
+    forecast_days = max(1, n_future + 1)        # today 포함
+    forecast_days = min(forecast_days, 16)      # API 한도
+    past_days = min(past_days, 92)
+
+    params = {
+        "latitude": lat, "longitude": lon,
+        "daily": ",".join(DAILY_VARS),
+        "past_days": past_days, "forecast_days": forecast_days,
+        "timezone": "auto", "wind_speed_unit": "ms",
+    }
+    if verbose:
+        print(f"🌐 FORECAST → past {past_days}d + today + forecast {forecast_days - 1}d "
+              f"(총 {past_days + forecast_days}일)")
+    r = _request_with_retry(FORECAST_API, params, verbose=verbose)
+    d = r.json()["daily"]
+    df = (_build_daily_df_from_response(d)
+          .sort_values("date").reset_index(drop=True))
+    if verbose: print(f"✅ daily {len(df)}일 수신")
+    return df
+
+
+def _slice_window_ending_at(daily_df, pred_date, W):
+    """pred_date 로 끝나는 W일 윈도우 (오름차순). 길이 부족 시 ValueError."""
+    end_ts = pd.Timestamp(pred_date)
+    start_ts = end_ts - pd.Timedelta(days=W - 1)
+    win = (daily_df[(daily_df["date"] >= start_ts) & (daily_df["date"] <= end_ts)]
+           .sort_values("date").reset_index(drop=True))
+    if len(win) < W:
+        raise ValueError(
+            f"{pred_date} 기준 {W}일 윈도우에 {len(win)}일만 존재 "
+            f"({start_ts.date()} ~ {end_ts.date()})"
+        )
+    return win
+
+
 def fetch_daily_for_target_window(lat, lon, target_date, n_days=16, verbose=True):
     today = date.today()
     end_date = target_date + timedelta(days=n_days - 1)
@@ -361,7 +408,7 @@ def _ko_name(feat):
 
 
 def top_features(ebm, X_row, k=3):
-    """회의록 22p: EBM local explanation → self_lag 제외 top-k"""
+    """회의록 22p: EBM local explanation → self_lag 제외 top-k (절댓값 기준)"""
     exp = ebm.explain_local(X_row)
     data = exp.data(0)
     pairs = []
@@ -371,6 +418,22 @@ def top_features(ebm, X_row, k=3):
         if ko is None: continue
         pairs.append((ko, float(score)))
     pairs.sort(key=lambda x: abs(x[1]), reverse=True)
+    return pairs[:k]
+
+
+def top_features_positive(ebm, X_row, k=3):
+    """위험도를 '높이는' 방향(양의 기여)으로 작용하는 feature top-k.
+    self_lag, region_*, *_isnull 제외."""
+    exp = ebm.explain_local(X_row)
+    data = exp.data(0)
+    pairs = []
+    for name, score in zip(data['names'], data['scores']):
+        if name in LAG_EXCLUDE: continue
+        if float(score) <= 0: continue
+        ko = _ko_name(name)
+        if ko is None: continue
+        pairs.append((ko, float(score)))
+    pairs.sort(key=lambda x: x[1], reverse=True)
     return pairs[:k]
 
 
@@ -384,7 +447,192 @@ def feature_phrases(top_feats):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  메인 예측 함수
+#  모델 캐싱 (joblib.load 1회만)
+# ═══════════════════════════════════════════════════════════════════════
+_MODEL_CACHE: dict = {}
+
+
+def _load_models():
+    if "ebm" not in _MODEL_CACHE:
+        _MODEL_CACHE["meta"] = joblib.load(MODEL_DIR / "feature_preprocess_meta.pkl")
+        _MODEL_CACHE["ebm"] = joblib.load(MODEL_DIR / "ebm_final.pkl")
+    return _MODEL_CACHE["meta"], _MODEL_CACHE["ebm"]
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  슬라이딩 윈도우 16일 예측
+# ═══════════════════════════════════════════════════════════════════════
+def _predict_at_date(
+    daily_df,
+    pred_date,
+    info,
+    meta,
+    ebm,
+    past_gdd_sum=0.0,
+    self_lag1=0.0,
+    self_lag2=0.0,
+):
+    """daily_df 에서 pred_date 로 끝나는 3/7/15일 윈도우로 단일 예측."""
+    # 1. 각 윈도우 (pred_date 로 끝나는 W일) feature 계산
+    feats = {"지역": info["region"]}
+    for W in (3, 7, 15):
+        window = _slice_window_ending_at(daily_df, pred_date, W)
+        feats.update(OpenMeteoMultiWindowExtractor._compute_window_block(window, W))
+
+    # 2. 날짜·시즌 메타
+    feats["날짜"] = pd.to_datetime(pred_date)
+    feats["year"] = pred_date.year
+    feats["month"] = pred_date.month
+    feats["dayofyear"] = pred_date.timetuple().tm_yday
+    season_start = date(pred_date.year, *SEASON_START_MD)
+    feats["days_since_season_start"] = max(0, (pred_date - season_start).days)
+    feats["season_idx"] = compute_season_idx(pred_date)
+    feats["gdd_15"] = float(max(0.0, feats["temp_mean_15"] - GDD_THRESHOLD))
+    feats["gdd_cum"] = float(past_gdd_sum) + feats["gdd_15"]
+    feats["self_lag1"] = 0.0 if pd.isna(self_lag1) else float(self_lag1)
+    feats["self_lag2"] = 0.0 if pd.isna(self_lag2) else float(self_lag2)
+
+    # 3. EBM 예측
+    df_row = pd.DataFrame([feats])
+    X = _transform_features_with_meta(df_row, meta)
+    raw_pred = float(np.clip(np.expm1(ebm.predict(X)[0]), 0, None))
+    p_ebm = normalize_p_ebm(raw_pred)
+    d = normalize_d(feats["self_lag1"])
+
+    # 4. CTM 환경 점수 E = compute_e(temp_mean_3, rh_mean_3)
+    e_used = float(np.clip(
+        compute_e(feats.get("temp_mean_3"), feats.get("rh_mean_3")),
+        0, 1,
+    ))
+
+    # 5. Risk Score + Grade + Override
+    risk_score = compute_risk_score(p_ebm, d, e_used)
+    base_grade = score_to_grade(risk_score)
+    final_grade, overrides = apply_override(base_grade, p_ebm, d, e_used)
+    season_label, situation = situation_message(p_ebm, d, e_used)
+
+    # 6. 양의 방향 top-3 feature
+    top_pos = top_features_positive(ebm, X, k=3)
+
+    return {
+        "target_date": pred_date.isoformat(),
+        "Risk_Score": risk_score,
+        "grade": final_grade,
+        "grade_name": GRADE_NAME[final_grade],
+        # 회의록 사양
+        "P_EBM": p_ebm,
+        "D": d,
+        "E": e_used,
+        # 주요 변수 (사용자 요청)
+        "ctm_score": e_used,
+        "self_lag1": feats["self_lag1"],
+        "self_lag2": feats["self_lag2"],
+        "top_features_positive": [
+            {"name": n, "contribution": c} for n, c in top_pos
+        ],
+        # 부가 정보
+        "raw_pred": raw_pred,
+        "override_triggered": overrides,
+        "situation_label": season_label,
+        "situation_message": situation,
+        "inputs": {
+            "temp_mean_3": float(feats["temp_mean_3"]),
+            "rh_mean_3": float(feats["rh_mean_3"]),
+            "temp_mean_15": float(feats["temp_mean_15"]),
+            "gdd_15": float(feats["gdd_15"]),
+            "gdd_cum": float(feats["gdd_cum"]),
+            "season_idx": int(feats["season_idx"]),
+        },
+    }
+
+
+def predict_window_series(
+    sido,
+    today=None,
+    n_future=15,
+    self_lag1=0.0,
+    self_lag2=0.0,
+    verbose=True,
+):
+    """
+    오늘부터 +n_future 일까지 (총 n_future+1 회) 슬라이딩 윈도우 예측.
+
+    데이터: today 기준 과거 14일 + 오늘 + 예보 (n_future)일 = 30일.
+    각 예측 시점 t (= today..today+n_future) 에서:
+      - 3 / 7 / 15일 윈도우 모두 'pred_date 로 끝나는' 윈도우 (backward).
+      - CTM E = compute_e(temp_mean_3, rh_mean_3)  (윈도우 안의 값으로 매번 갱신)
+      - 양의 방향 top-3 EBM feature, self_lag, Risk_Score 저장.
+    """
+    if today is None:
+        today = date.today()
+    elif isinstance(today, str):
+        today = date.fromisoformat(today)
+    elif isinstance(today, datetime):
+        today = today.date()
+
+    info = get_sido_info(sido)
+    if info["region"] is None:
+        raise ValueError(f"'{sido}' 학습 데이터에 없는 지역")
+
+    if verbose:
+        print(f"\n{'═'*64}")
+        print(f"  {sido}  (today={today}, +{n_future}일 예측)")
+        print(f"{'═'*64}")
+
+    # 1. 30일 daily 데이터 한 번에 fetch
+    daily_df = fetch_30day_window(
+        info["lat"], info["lon"], today,
+        n_past=14, n_future=n_future, verbose=verbose,
+    )
+
+    # 2. 모델 (1회 캐시)
+    meta, ebm = _load_models()
+
+    # 3. gdd_cum 누적 base — 오늘 이전 표준 조사일까지의 gdd_15 합 (한 번만 계산)
+    if verbose: print("📐 gdd_cum 누적 base 계산 중...")
+    try:
+        past_gdd_sum = compute_gdd_cum(
+            info["lat"], info["lon"], today, todays_gdd_15=0.0, verbose=False,
+        )
+    except Exception as e:
+        if verbose: print(f"   ⚠️ past gdd 계산 실패 → 0 처리: {e}")
+        past_gdd_sum = 0.0
+
+    # 4. 16개 예측 시점 순회
+    predictions = []
+    for offset in range(n_future + 1):     # 0..n_future
+        pred_date = today + timedelta(days=offset)
+        try:
+            r = _predict_at_date(
+                daily_df, pred_date, info, meta, ebm,
+                past_gdd_sum=past_gdd_sum,
+                self_lag1=self_lag1, self_lag2=self_lag2,
+            )
+            r["offset_days"] = offset
+            predictions.append(r)
+            if verbose:
+                print(f"  · +{offset:2d}일 ({pred_date}): "
+                      f"Risk={r['Risk_Score']:.4f}  "
+                      f"E={r['E']:.4f}  grade={r['grade']} {r['grade_name']}")
+        except Exception as e:
+            predictions.append({
+                "offset_days": offset,
+                "target_date": pred_date.isoformat(),
+                "error": str(e),
+            })
+            if verbose: print(f"  · +{offset:2d}일 ({pred_date}): ❌ {e}")
+
+    return {
+        "sido": sido,
+        "region": info["region"],
+        "base_date": today.isoformat(),
+        "n_future": n_future,
+        "predictions": predictions,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  메인 예측 함수 (단일 날짜 — CLI 호환용)
 # ═══════════════════════════════════════════════════════════════════════
 def predict(
     sido,
@@ -452,9 +700,8 @@ def predict(
     feats["self_lag2"] = self_lag2
 
     df_row = pd.DataFrame([feats])
-    meta = joblib.load(MODEL_DIR / "feature_preprocess_meta.pkl")
+    meta, ebm = _load_models()
     X = _transform_features_with_meta(df_row, meta)
-    ebm = joblib.load(MODEL_DIR / "ebm_final.pkl")
 
     # ── 회의록 사양 계산 ────────────────────────────────────────
     raw_pred = float(np.clip(np.expm1(ebm.predict(X)[0]), 0, None))
@@ -577,6 +824,9 @@ def main():
     target_sido_list = list_sido()
     print(f"🎯 오늘 연산할 광역단체 수: {len(target_sido_list)}개")
 
+    # 모델 1회 미리 로드 (전 지역 공유)
+    _load_models()
+
     for sido in target_sido_list:
         info = KR_SIDO[sido]
         # 학습 데이터에 없는 지역(region=None)은 건너뜀
@@ -584,17 +834,20 @@ def main():
             print(f"⏭️ [{sido}] 학습 데이터 미포함 → skip")
             continue
 
-        print(f"\n🌾 [{sido}] 예측 시작...")
+        print(f"\n🌾 [{sido}] 16일 슬라이딩 윈도우 예측 시작...")
         try:
-            result = predict(sido=sido, verbose=False)
+            result = predict_window_series(
+                sido=sido, n_future=15, verbose=False,
+            )
             result["updated_at"] = datetime.now().isoformat()
 
             file_path = os.path.join(output_dir, f"{sido}.json")
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(result, f, ensure_ascii=False, indent=4, default=str)
 
-            print(f"✅ [{sido}] JSON 저장 완료: {file_path} "
-                  f"(grade={result['grade']} {result['grade_name']})")
+            n_ok = sum(1 for p in result["predictions"] if "error" not in p)
+            n_total = len(result["predictions"])
+            print(f"✅ [{sido}] {n_ok}/{n_total}일 예측 완료 → {file_path}")
         except Exception as e:
             print(f"❌ [{sido}] 예측 실패: {e}")
 
