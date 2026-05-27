@@ -946,6 +946,8 @@ def _predict_at_date(
         "inputs": {
             "temp_mean_3": float(feats["temp_mean_3"]),
             "rh_mean_3": float(feats["rh_mean_3"]),
+            "wind_mean_3": float(feats["wind_mean_3"]),
+            "wind_mean_7": float(feats["wind_mean_7"]),
             "temp_mean_15": float(feats["temp_mean_15"]),
             "gdd_15": float(feats["gdd_15"]),
             "gdd_cum": float(feats["gdd_cum"]),
@@ -1027,11 +1029,53 @@ def predict_window_series(
     # 2. 모델 (1회 캐시)
     meta, ebm = _load_models()
 
-    # 3. gdd_cum: 추가 API 호출 없이 0으로 근사 (각 pred_date 에서 gdd_15 만 사용)
-    #    → 시즌 누적 적산온도는 daily 배치 운영상 외부 상태로 관리하는 게 적절.
-    #    무리한 ARCHIVE-API 호출은 GitHub Actions IP의 Open-Meteo 무료 한도(429)와
-    #    502/timeout 의 주된 원인이라 제거.
-    past_gdd_sum = 0.0
+    # 3. gdd_cum: 시즌 누적 적산온도 (Tbase=25°C, 균 활동 임계).
+    #    예전엔 batch 경로에서 0 으로 고정해뒀으나 → 7-9월에 gdd_cum 이 항상
+    #    gdd_15 와 같아지는 버그 → 모델 input 왜곡. 이제 제대로 계산.
+    #    구현:
+    #      (a) season_start(6/1) ~ 어제 사이 의 STANDARD_SURVEY_MD 각 시점에서
+    #          15일 윈도우 mean_temp − 25 (≥0) 의 합을 1회 fetch 로 산출.
+    #      (b) offset > 0 (예보) 에서 today < survey_date ≤ pred_date 인 survey
+    #          가 있으면 그 survey 의 gdd_15 도 더해 누적 (예보용 근사).
+    season_start = date(today.year, *SEASON_START_MD)
+    past_surveys_today = [
+        date(today.year, m, d) for (m, d) in STANDARD_SURVEY_MD
+        if date(today.year, m, d) < today
+    ]
+    past_gdd_sum_today = 0.0
+    if past_surveys_today:
+        try:
+            tdf = _fetch_tmean_series(
+                info["lat"], info["lon"],
+                season_start - timedelta(days=14),
+                past_surveys_today[-1],
+                verbose=verbose,
+            )
+            for sd in past_surveys_today:
+                lo = pd.Timestamp(sd - timedelta(days=14))
+                hi = pd.Timestamp(sd)
+                win = tdf[(tdf["date"] >= lo) & (tdf["date"] <= hi)]
+                if len(win) == 0:
+                    continue
+                tm15 = float(win["tmean"].mean())
+                past_gdd_sum_today += max(0.0, tm15 - GDD_THRESHOLD)
+            if verbose:
+                print(f"📐 past_gdd_sum (today, surveys={len(past_surveys_today)}): "
+                      f"{past_gdd_sum_today:.2f}")
+        except Exception as e:
+            if verbose:
+                print(f"   ⚠️ past_gdd_sum 계산 실패 (0 으로 fallback): {e}")
+            past_gdd_sum_today = 0.0
+
+    def _gdd_15_from_daily_df(survey_date):
+        """daily_df 안에서 survey_date 로 끝나는 15일 윈도우의 gdd_15.
+        윈도우 부족 시 0 반환."""
+        lo = pd.Timestamp(survey_date - timedelta(days=14))
+        hi = pd.Timestamp(survey_date)
+        win = daily_df[(daily_df["date"] >= lo) & (daily_df["date"] <= hi)]
+        if len(win) < 15:
+            return 0.0
+        return float(max(0.0, win["tmean"].mean() - GDD_THRESHOLD))
 
     # 4. 16개 예측 시점 순회
     #    offset 0 (오늘)   → 카드/요약/생육시기 등 분석 리포트 포함
@@ -1040,10 +1084,21 @@ def predict_window_series(
     for offset in range(n_future + 1):     # 0..n_future
         pred_date = today + timedelta(days=offset)
         is_today = (offset == 0)
+
+        # offset 의 past_gdd_sum: 오늘 시점 누적 + (오늘, pred_date] 사이에
+        # 들어온 survey 들의 gdd_15 합산 (daily_df 만으로 산출 가능)
+        crossed = [
+            date(pred_date.year, m, d) for (m, d) in STANDARD_SURVEY_MD
+            if today <= date(pred_date.year, m, d) < pred_date
+        ]
+        past_gdd_sum_offset = past_gdd_sum_today + sum(
+            _gdd_15_from_daily_df(s) for s in crossed
+        )
+
         try:
             r = _predict_at_date(
                 daily_df, pred_date, info, meta, ebm,
-                past_gdd_sum=past_gdd_sum,
+                past_gdd_sum=past_gdd_sum_offset,
                 self_lag1=self_lag1, self_lag2=self_lag2,
                 include_report=is_today,
             )
