@@ -863,8 +863,13 @@ def _predict_at_date(
     past_gdd_sum=0.0,
     self_lag1=0.0,
     self_lag2=0.0,
+    include_report=True,
 ):
-    """daily_df 에서 pred_date 로 끝나는 3/7/15일 윈도우로 단일 예측."""
+    """daily_df 에서 pred_date 로 끝나는 3/7/15일 윈도우로 단일 예측.
+
+    include_report=True  → 카드/요약/생육시기 등 분석 필드 포함 (오늘 예측용)
+    include_report=False → 위험 등급·위험도·Risk_score 등 결과 필드만 (예보용)
+    """
     # 1. 각 윈도우 (pred_date 로 끝나는 W일) feature 계산
     feats = {"지역": info["region"]}
     for W in (3, 7, 15):
@@ -903,24 +908,11 @@ def _predict_at_date(
     final_grade, overrides = apply_override(base_grade, p_ebm, d, e_used)
     season_label, situation = situation_message(p_ebm, d, e_used)
 
-    # 6. 리포트 카드 (리포트_멘트_매트릭스.xlsx 룰)
-    climate_cards = _select_climate_cards(ebm, X, k=3)
-    lag_card = _select_lag_card(ebm, X, d, feats["self_lag1"], feats["self_lag2"])
-    ctm_card = _select_ctm_card(d, e_used, risk_score,
-                                feats.get("temp_mean_3"), feats.get("rh_mean_3"))
-
-    cards = list(climate_cards)
-    if lag_card: cards.append(lag_card)
-    if ctm_card: cards.append(ctm_card)
-    for i, c in enumerate(cards, 1):
-        c["no"] = i
-
-    growth_stage = _growth_stage(pred_date)
-    top_subtitle = climate_cards[0]["subtitle"] if climate_cards else None
     ctm_ratio = ((1 - ALPHA) * d * e_used) / risk_score if risk_score > 0 else 0.0
 
-    return {
-        # ── 필수 필드 (사용자 요청) ──
+    # ── 모든 offset 에 공통: 결과 필드 + 메트릭 + 입력 + 호환 키 ──
+    result = {
+        # 필수 필드 (시도는 상위 dict, 기준_날짜·위험_등급·위험도·Risk_score 는 여기)
         "기준_날짜": pred_date.isoformat(),
         "기준_날짜_표시": f"{pred_date.month}월 {pred_date.day}일",
         "위험_등급": GRADE_NAME[final_grade],
@@ -928,15 +920,6 @@ def _predict_at_date(
         "위험도": situation,
         "Risk_score": float(risk_score),
 
-        # ── 리포트 카드 (앱 상단 표시) ──
-        "summary": None,                   # 상위 루프에서 grade_trend 산출 후 채움
-        "summary_code": None,
-        "growth_stage": growth_stage,
-        "growth_stage_desc": GROWTH_STAGE_DESC.get(growth_stage, growth_stage),
-        "grade_change": None,              # 상위 루프에서 prev_grade 와 비교 후 채움
-        "cards": cards,
-
-        # ── 부가 메트릭 ──
         "metrics": {
             "P_EBM": float(p_ebm),
             "D": float(d),
@@ -958,13 +941,37 @@ def _predict_at_date(
             "gdd_cum": float(feats["gdd_cum"]),
             "season_idx": int(feats["season_idx"]),
         },
-
-        # ── 기존 키 호환성 (이전 JSON 소비자를 위해 별칭 유지) ──
+        # 호환 키 (구 JSON 소비자용)
         "target_date": pred_date.isoformat(),
         "grade": int(final_grade),
         "grade_name": GRADE_NAME[final_grade],
         "Risk_Score": float(risk_score),
     }
+
+    # ── 오늘(offset 0) 만: 분석/리포트 카드 & 한줄요약 & 생육시기 ──
+    if include_report:
+        climate_cards = _select_climate_cards(ebm, X, k=3)
+        lag_card = _select_lag_card(ebm, X, d, feats["self_lag1"], feats["self_lag2"])
+        ctm_card = _select_ctm_card(d, e_used, risk_score,
+                                    feats.get("temp_mean_3"), feats.get("rh_mean_3"))
+
+        cards = list(climate_cards)
+        if lag_card: cards.append(lag_card)
+        if ctm_card: cards.append(ctm_card)
+        for i, c in enumerate(cards, 1):
+            c["no"] = i
+
+        growth_stage = _growth_stage(pred_date)
+        result.update({
+            "summary": None,                # 상위 루프에서 grade_trend 산출 후 채움
+            "summary_code": None,
+            "growth_stage": growth_stage,
+            "growth_stage_desc": GROWTH_STAGE_DESC.get(growth_stage, growth_stage),
+            "grade_change": None,           # 상위 루프에서 prev_grade 와 비교 후 채움
+            "cards": cards,
+        })
+
+    return result
 
 
 def predict_window_series(
@@ -973,6 +980,7 @@ def predict_window_series(
     n_future=15,
     self_lag1=0.0,
     self_lag2=0.0,
+    prev_today_grade=None,    # 어제 배치의 '오늘' 등급 (offset 0 등급변화 계산용)
     verbose=True,
 ):
     """
@@ -1016,40 +1024,45 @@ def predict_window_series(
     past_gdd_sum = 0.0
 
     # 4. 16개 예측 시점 순회
+    #    offset 0 (오늘)   → 카드/요약/생육시기 등 분석 리포트 포함
+    #    offset 1~15 (예보) → 결과 필드만 (Risk_score · 위험_등급 · 위험도 등)
     predictions = []
-    prev_grade = None
     for offset in range(n_future + 1):     # 0..n_future
         pred_date = today + timedelta(days=offset)
+        is_today = (offset == 0)
         try:
             r = _predict_at_date(
                 daily_df, pred_date, info, meta, ebm,
                 past_gdd_sum=past_gdd_sum,
                 self_lag1=self_lag1, self_lag2=self_lag2,
+                include_report=is_today,
             )
             r["offset_days"] = offset
 
-            # 인접 offset 간 등급 변화 산출 (offset 0 은 prev 없음 → null)
-            curr_grade = r["위험_등급_코드"]
-            r["grade_change"] = _grade_change_label(prev_grade, curr_grade)
-            trend = (r["grade_change"]["direction"]
-                     if r["grade_change"] else 'same')
-
-            # 한 줄 요약 (등급 추세 반영)
-            top_subtitle = r["cards"][0]["subtitle"] if r["cards"] else None
-            summary_code, summary = _render_summary(
-                r["metrics"]["P_EBM"], r["metrics"]["E"],
-                trend, r["growth_stage"], top_subtitle,
-            )
-            r["summary_code"] = summary_code
-            r["summary"] = summary
+            # 오늘에만 한줄요약 + grade_change 채우기.
+            # grade_change 는 '어제 배치의 오늘 등급' vs '오늘 등급' 비교.
+            # prev_today_grade 는 main() 이 직전 JSON 파일에서 읽어 전달.
+            # 없으면 (= 첫 실행) → null, 한줄요약 추세는 'same' 처리.
+            if is_today:
+                curr_g = r["위험_등급_코드"]
+                r["grade_change"] = (_grade_change_label(prev_today_grade, curr_g)
+                                     if prev_today_grade is not None else None)
+                trend = (r["grade_change"]["direction"]
+                         if r["grade_change"] else 'same')
+                top_subtitle = r["cards"][0]["subtitle"] if r.get("cards") else None
+                sc, sm = _render_summary(
+                    r["metrics"]["P_EBM"], r["metrics"]["E"],
+                    trend, r["growth_stage"], top_subtitle,
+                )
+                r["summary_code"] = sc
+                r["summary"] = sm
 
             predictions.append(r)
-            prev_grade = curr_grade
             if verbose:
                 print(f"  · +{offset:2d}일 ({pred_date}): "
                       f"Risk={r['Risk_score']:.4f}  "
                       f"E={r['metrics']['E']:.4f}  "
-                      f"grade={curr_grade} {r['위험_등급']}")
+                      f"grade={r['위험_등급_코드']} {r['위험_등급']}")
         except Exception as e:
             predictions.append({
                 "offset_days": offset,
@@ -1274,12 +1287,28 @@ def main():
 
         print(f"\n🌾 [{sido}] 16일 슬라이딩 윈도우 예측 시작...")
         try:
+            file_path = os.path.join(output_dir, f"{sido}.json")
+
+            # 어제 배치 JSON 의 'offset 0 위험_등급_코드' 를 읽어 등급변화 산출에 활용
+            prev_grade = None
+            if os.path.exists(file_path):
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        prev = json.load(f)
+                    for p in prev.get("predictions", []):
+                        if p.get("offset_days") == 0 and "error" not in p:
+                            prev_grade = p.get("위험_등급_코드", p.get("grade"))
+                            break
+                except Exception as ee:
+                    print(f"   ⚠️ 이전 JSON 파싱 실패 (무시): {ee}")
+
             result = predict_window_series(
-                sido=sido, n_future=15, verbose=False,
+                sido=sido, n_future=15,
+                prev_today_grade=prev_grade,
+                verbose=False,
             )
             result["updated_at"] = datetime.now().isoformat()
 
-            file_path = os.path.join(output_dir, f"{sido}.json")
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(result, f, ensure_ascii=False, indent=4, default=str)
 
