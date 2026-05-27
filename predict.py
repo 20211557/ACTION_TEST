@@ -886,6 +886,14 @@ def _predict_at_date(
         window = _slice_window_ending_at(daily_df, pred_date, W)
         feats.update(OpenMeteoMultiWindowExtractor._compute_window_block(window, W))
 
+    # 1b. pred_date 당일 값 추출 (앱 JSON 노출용: 윈도우 평균이 아닌 하루 값)
+    day_row = daily_df[daily_df["date"] == pd.Timestamp(pred_date)]
+    if len(day_row) > 0:
+        day_wind_speed   = float(day_row["wind_speed_mean"].iloc[0])
+        day_precipitation = float(day_row["precipitation"].iloc[0])
+    else:
+        day_wind_speed = day_precipitation = None
+
     # 2. 날짜·시즌 메타
     feats["날짜"] = pd.to_datetime(pred_date)
     feats["year"] = pred_date.year
@@ -946,9 +954,9 @@ def _predict_at_date(
         "inputs": {
             "temp_mean_3": float(feats["temp_mean_3"]),
             "rh_mean_3": float(feats["rh_mean_3"]),
-            "wind_mean_3": float(feats["wind_mean_3"]),
-            "wind_mean_7": float(feats["wind_mean_7"]),
             "temp_mean_15": float(feats["temp_mean_15"]),
+            "wind_speed_today": day_wind_speed,        # 그 날 평균풍속 (m/s)
+            "precipitation_today": day_precipitation,  # 그 날 강수량 (mm)
             "gdd_15": float(feats["gdd_15"]),
             "gdd_cum": float(feats["gdd_cum"]),
             "season_idx": int(feats["season_idx"]),
