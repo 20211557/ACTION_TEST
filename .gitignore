@@ -67,3 +67,7 @@ node_modules/
 
 # dataconnect generated files
 .dataconnect
+
+# compute_baselines.py 캐시 (Open-Meteo Archive raw daily, ~2.6MB)
+_baseline_cache/
+__pycache__/

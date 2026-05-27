@@ -192,15 +192,18 @@ FEATURE_GROUP = {
     'soil_moisture_mean_15': ('G', '토양',     15, '',    'UP',   '토양수분'),
 }
 
-# 평년값 (mean baseline). 매트릭스 시트의 'val > baseline' 조건과
-# [diff] 플레이스홀더 계산에 사용. 한국 여름철 기후값으로 추정.
+# 평년값 (baseline) — 매트릭스 시트의 'val > baseline' 조건과
+# [diff] 플레이스홀더 계산에 사용.
+# 산출: 2014~2023년 6~9월, 15개 학습 지역 통합 (n=18,300 표본/feature) 의 중앙값.
+# compute_baselines.py 가 Open-Meteo Archive API 로 직접 계산.
+# 단위 변환은 open_meteo_3_7_15.py 와 동일 (sunshine_duration ÷360,
+# soil_moisture ×65 등).
 BASELINES = {
-    'rh_mean_3': 74, 'rh_mean_7': 74, 'rh_mean_15': 74,
-    'rain_sum_3': 15, 'rain_sum_7': 35, 'rain_sum_15': 75,
-    'sunshine_sum_3': 24, 'sunshine_sum_7': 56, 'sunshine_sum_15': 120,
-    'temp_mean_3': 22, 'temp_mean_7': 22, 'temp_mean_15': 22,
-    'soil_moisture_mean_3': 16, 'soil_moisture_mean_7': 16, 'soil_moisture_mean_15': 16,
-    'soil_temp_mean_3': 20, 'soil_temp_mean_7': 20, 'soil_temp_mean_15': 20,
+    'rh_mean_3':              80.3,    'rh_mean_7':              80.1,    'rh_mean_15':              79.9,
+    'rain_sum_3':              5.9,    'rain_sum_7':             26.8,    'rain_sum_15':             72.2,
+    'sunshine_sum_3':        279.2,    'sunshine_sum_7':        635.6,    'sunshine_sum_15':       1347.7,
+    'soil_moisture_mean_3':   22.90,   'soil_moisture_mean_7':   22.72,   'soil_moisture_mean_15':   22.36,
+    'soil_temp_mean_3':       24.07,   'soil_temp_mean_7':       24.06,   'soil_temp_mean_15':       24.03,
 }
 
 GROWTH_STAGE_DESC = {
@@ -546,13 +549,20 @@ def feature_phrases(top_feats):
 # ═══════════════════════════════════════════════════════════════════════
 def _growth_stage(target_date):
     """월·일 → 벼 생육시기 (한줄요약_매트릭스 시트 참조).
-    리포트 예시(5월 26일 = 분얼기)에 맞춘 한국 표준 작기 기준."""
+    RDA(농촌진흥청) 기준 한국 표준 벼 작기:
+      이앙기      ~ 6/10      모내기 시기
+      분얼기      6/11 ~ 7/15  새 줄기가 늘어나는 시기
+      유수형성기  7/16 ~ 7/31  이삭이 만들어지는 시기
+      수잉기      8/1  ~ 8/15  이삭이 패기 직전
+      출수기      8/16 ~ 8/31  이삭이 패는 시기
+      등숙기      9/1  ~        낟알이 여무는 시기
+    """
     md = (target_date.month, target_date.day)
-    if md < (5, 16): return '이앙기'
-    if md < (7, 6):  return '분얼기'
-    if md < (7, 26): return '유수형성기'
-    if md < (8, 16): return '수잉기'
-    if md < (9, 6):  return '출수기'
+    if md <= (6, 10):  return '이앙기'
+    if md <= (7, 15):  return '분얼기'
+    if md <= (7, 31):  return '유수형성기'
+    if md <= (8, 15):  return '수잉기'
+    if md <= (8, 31):  return '출수기'
     return '등숙기'
 
 
