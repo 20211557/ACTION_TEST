@@ -39,6 +39,8 @@ jobs:
         EOF
 
     - name: Run Daily Prediction Script
+      env:
+        NCPMS_API_KEY: ${{ secrets.NCPMS_API_KEY }}
       run: python predict.py
 
     - name: Deploy to Firebase Hosting
