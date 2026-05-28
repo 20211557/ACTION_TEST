@@ -607,10 +607,10 @@ def _render_climate_card(feature, value, score, risk_score):
     """EBM_멘트_매트릭스 시트 row 단위 분기. 매칭 없으면 None.
 
     [통일된 게이트] 엑셀 'score > 0 / score < 0' 사인 체크를 모든 그룹에서
-    Risk_score >= B1 게이트로 교체 (E_EVAP 의 결정론적 게이트와 동일 룰).
+    Risk_score > 0 게이트로 교체 (E_EVAP 결정론적 게이트와 동일 룰).
 
-    이로써 모든 카드 (weather/lag/CTM/E_EVAP) 가 '전체 위험도 가 의미있는 수준
-    일 때만 노출' 이라는 일관된 정책을 따름.
+    이로써 모든 카드 (weather/lag/CTM/E_EVAP) 가 '전체 위험도가 0 이상일 때만
+    노출' 이라는 일관된 정책을 따름. Risk_score == 0 인 극단 안전 케이스만 차단.
 
     EBM top-3 선정 자체는 그대로 유지 → 그날 가장 기여도 큰 feature 들이 선택됨.
     sign check 가 빠졌지만, |score| top-3 안에 들 정도면 EBM 이 그 feature 를
@@ -621,7 +621,7 @@ def _render_climate_card(feature, value, score, risk_score):
     """
     if feature not in FEATURE_GROUP:
         return None
-    if risk_score < B1:        # 안전 등급 → 어떤 weather 카드도 노출 안 함
+    if risk_score <= 0:        # Risk_score == 0 (완전 안전) → 카드 없음
         return None
     grp, grp_name, n, unit, _dir, short_ko = FEATURE_GROUP[feature]
     v = float(value)
@@ -846,14 +846,13 @@ def _select_evaporation_card(feats, risk_score, existing_cards):
     """E_EVAP 카드 — 결정론적 분기 (EBM 모델이 evaporation 미학습이라 우회).
 
     엑셀 룰: val < baseline AND score > 0.
-    'score > 0' 을 직접 평가할 수 없으므로 대체 게이트 사용:
-      - Risk_score >= B1 (= 안전 등급 초과: 0.03)
-        → "전체 위험도가 의미있는 수준일 때만 카드 노출" 의 정신을 유지
+    'score > 0' 을 직접 평가할 수 없으므로 weather 카드와 통일된 게이트 사용:
+      - Risk_score > 0 (Risk_score == 0 인 완전 안전 케이스만 차단)
 
     Group E 가 이미 다른 카드(E_LOW 등) 로 대표되어 있으면 표시 안 함
     → '그룹 내 1개 카드' 원칙 준수.
     """
-    if risk_score < B1:
+    if risk_score <= 0:
         return None
     if any(c.get("group") == "E" for c in existing_cards):
         return None
