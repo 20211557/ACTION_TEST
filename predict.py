@@ -603,16 +603,25 @@ def _f_rh(rh):
     return float(1.0 / (1.0 + np.exp(g)))
 
 
-def _render_climate_card(feature, value, score):
+def _render_climate_card(feature, value, score, risk_score):
     """EBM_멘트_매트릭스 시트 row 단위 분기. 매칭 없으면 None.
 
-    엑셀 Sheet 2 의 '표시 조건' 컬럼 (score > 0 / score < 0) 모두 enforce.
-    val 조건만 맞고 score 방향이 다르면 None 반환 → 메시지-점수 충돌 차단.
+    [통일된 게이트] 엑셀 'score > 0 / score < 0' 사인 체크를 모든 그룹에서
+    Risk_score >= B1 게이트로 교체 (E_EVAP 의 결정론적 게이트와 동일 룰).
 
-    단위 변환:
-      - sunshine_sum : deci-hour(0.1시간) 단위 저장 → 메시지는 /10 으로 시간 변환
+    이로써 모든 카드 (weather/lag/CTM/E_EVAP) 가 '전체 위험도 가 의미있는 수준
+    일 때만 노출' 이라는 일관된 정책을 따름.
+
+    EBM top-3 선정 자체는 그대로 유지 → 그날 가장 기여도 큰 feature 들이 선택됨.
+    sign check 가 빠졌지만, |score| top-3 안에 들 정도면 EBM 이 그 feature 를
+    중요시한다는 의미라 메시지 방향과 어긋날 가능성은 매우 낮음.
+
+    단위 변환: sunshine_sum 은 deci-hour(0.1시간) 저장 → 메시지에서 /10 으로
+              시간 변환.
     """
     if feature not in FEATURE_GROUP:
+        return None
+    if risk_score < B1:        # 안전 등급 → 어떤 weather 카드도 노출 안 함
         return None
     grp, grp_name, n, unit, _dir, short_ko = FEATURE_GROUP[feature]
     v = float(value)
@@ -621,25 +630,25 @@ def _render_climate_card(feature, value, score):
 
     if grp == 'A':
         if feature.startswith('temp_mean'):
-            if 25 <= v <= 32 and s > 0:
+            if 25 <= v <= 32:
                 code, title = 'A_HOT_OPT', '기온이 평년보다 높아요'
                 msg = f'최근 {n}일 평균 {v:.1f}°C — 균이 가장 잘 자라는 25~30°C 구간이에요.'
-            elif v > 35 and s > 0:
+            elif v > 35:
                 code, title = 'A_HOT_OUT', '기온이 매우 높아요'
                 msg = f'기온이 {v:.1f}°C로 균이 활동하는 범위를 넘었어요. 기온이 내려오면 다시 주의가 필요해요.'
-            elif v < 22 and s > 0:
+            elif v < 22:
                 code, title = 'A_COLD', '기온이 낮아요'
                 msg = f'기온이 {v:.1f}°C로 균이 활동하기 어려운 상태예요.'
-        elif feature.startswith('hot_days') and v >= 3 and s > 0:
+        elif feature.startswith('hot_days') and v >= 3:
             code, title = 'A_HOTDAYS', '더운 날이 많았어요'
             msg = f'최근 {n}일 중 {int(v)}일이 30°C를 넘었어요. 균이 폭발적으로 번지기 좋은 날씨가 반복됐어요.'
-        elif feature.startswith('dtr_mean') and v > 10 and s > 0:
+        elif feature.startswith('dtr_mean') and v > 10:
             code, title = 'A_DTR', '일교차가 커요'
             msg = f'일교차가 {v:.1f}°C예요. 밤에 이슬이 많이 맺혀 잎집 습도가 올라가요.'
-        elif feature.startswith('soil_temp_mean') and v > BASELINES.get(feature, 20) and s > 0:
+        elif feature.startswith('soil_temp_mean') and v > BASELINES.get(feature, 20):
             code, title = 'G_TEMP', '토양 온도가 높아요'
             msg = f'토양 온도 {v:.1f}°C — 균 활동이 지표면 가까이서도 활발해질 수 있어요.'
-        elif feature.startswith('tmax_max') and v > 32 and s > 0:
+        elif feature.startswith('tmax_max') and v > 32:
             code, title = 'A_HOT_OUT', '최고기온이 매우 높아요'
             msg = f'최고기온이 {v:.1f}°C로 균이 활동하는 범위 가까이까지 올랐어요.'
 
@@ -647,66 +656,64 @@ def _render_climate_card(feature, value, score):
         if feature.startswith('rh_mean'):
             base = BASELINES.get(feature, 74)
             diff = abs(v - base)
-            if v > base and s > 0:
+            if v > base:
                 code, title = 'B_RH_HIGH', '습도가 높아졌어요'
                 msg = f'최근 {n}일 평균 {v:.0f}% — 평년보다 {diff:.0f}% 더 습해요.'
-            elif v <= base and s < 0:
+            else:
                 code, title = 'B_RH_LOW', '습도가 낮아졌어요'
                 msg = f'최근 {n}일 평균 {v:.0f}% — 평년보다 {diff:.0f}% 덜 습해요.'
-        elif feature.startswith('dew_mean') and s > 0:
+        elif feature.startswith('dew_mean'):
             code, title = 'B_DEW', '이슬이 많이 맺혀요'
             msg = f'이슬점이 {v:.1f}°C로 높아요. 밤사이 잎집 표면에 수분이 오래 남아요.'
-        elif feature.startswith('vapor_mean') and s > 0:
+        elif feature.startswith('vapor_mean'):
             code, title = 'B_VAPOR', '대기가 습해요'
             msg = '대기 중 수증기가 많아요. 밀식된 논일수록 포기 사이 습도가 더 빠르게 쌓여요.'
-        elif feature.startswith('humid_days') and v >= 2 and s > 0:
+        elif feature.startswith('humid_days') and v >= 2:
             code, title = 'B_HUMDAYS', '습한 날이 많았어요'
             msg = f'최근 {n}일 중 {int(v)}일이 습도 90% 이상이었어요. 균이 침입하기 충분한 수분이 계속 공급됐어요.'
 
     elif grp == 'C':
         if feature.startswith('rain_sum'):
             base = BASELINES.get(feature, 0)
-            if v > base and s > 0:
+            if v > base:
                 code, title = 'C_RAINSUM', '강수가 많았어요'
                 msg = f'최근 {n}일 누적 {v:.0f}mm — 잎집이 오랫동안 젖어 있으면서 균이 옮겨붙기 쉬워요.'
-        elif feature.startswith('rainy_days') and v >= 3 and s > 0:
+        elif feature.startswith('rainy_days') and v >= 3:
             code, title = 'C_RAINDAYS', '비 오는 날이 많았어요'
             msg = f'최근 {n}일 중 {int(v)}일 비가 왔어요. 잎집이 마를 틈이 없었어요.'
-        elif feature.startswith('heavy_rain_days') and v >= 1 and s > 0:
+        elif feature.startswith('heavy_rain_days') and v >= 1:
             code, title = 'C_HEAVY', '강한 비가 잦았어요'
             msg = f'강한 비({int(v)}일)가 균핵을 논 전체로 퍼뜨렸을 수 있어요.'
 
     elif grp == 'D':
         if feature.startswith('wind_mean'):
-            if v < 2 and s > 0:
+            if v < 2:
                 code, title = 'D_LOW', '통풍이 부족해요'
                 msg = f'평균 풍속 {v:.1f}m/s — 바람이 거의 없어요. 포기 사이 공기가 순환되지 않아 습기가 쌓이기 쉬워요.'
-            elif v >= 2 and s < 0:
+            else:
                 code, title = 'D_OK', '바람이 적당히 불고 있어요'
                 msg = f'풍속 {v:.1f}m/s — 통풍이 되면서 습도 누적을 막아줘요.'
 
     elif grp == 'E':
         if feature.startswith('sunshine_sum'):
             base = BASELINES.get(feature, 0)
-            if v < base and s > 0:
+            if v < base:
                 code, title = 'E_LOW', '흐린 날이 많았어요'
-                # sunshine_sum 은 deci-hour 단위 저장 (sunshine_duration 초 ÷ 360)
-                # → 메시지에선 /10 으로 시간 변환
                 msg = f'최근 {n}일 일조 {v/10:.0f}시간 — 잎집이 마를 시간이 부족해 습도가 유지됐어요.'
         elif feature.startswith('evaporation_mean'):
             base = BASELINES.get(feature, 3.5)
-            if v < base and s > 0:
+            if v < base:
                 code, title = 'E_EVAP', '수분이 잘 안 날아가요'
                 msg = f'증발량이 {v:.1f}로 적어요. 논 표면 수분이 오래 남아 있어요.'
 
     elif grp == 'F':
-        if v >= 2 and s > 0:
+        if v >= 2:
             code, title = 'F_COMP', '고온다습한 날이 반복됐어요'
             msg = f'최근 {n}일 중 {int(v)}일이 고온다습한 날씨였어요. 이 기간 동안 균이 잎집에 침입하기 가장 좋은 조건이 이어졌어요.'
 
     elif grp == 'G':
         base = BASELINES.get(feature, 0)
-        if feature.startswith('soil_moisture') and v > base and s > 0:
+        if feature.startswith('soil_moisture') and v > base:
             code, title = 'G_MOIST', '토양이 습해요'
             msg = f'논 토양 수분이 {v:.1f}로 높아요. 포기 아랫부분 잎집 주변 습도도 덩달아 올라가요.'
 
@@ -727,8 +734,10 @@ def _render_climate_card(feature, value, score):
     }
 
 
-def _select_climate_cards(ebm, X_row, k=3):
-    """카드_선택_로직 Step1~4: 그룹 dedup → |score| 상위 k개 → 카드 렌더."""
+def _select_climate_cards(ebm, X_row, risk_score, k=3):
+    """카드_선택_로직 Step1~4: 그룹 dedup → |score| 상위 k개 → 카드 렌더.
+    risk_score 는 _render_climate_card 의 통일 게이트(>= B1) 평가에 사용.
+    """
     exp = ebm.explain_local(X_row)
     data = exp.data(0)
     group_top = {}
@@ -747,7 +756,7 @@ def _select_climate_cards(ebm, X_row, k=3):
     for feat, sc in sorted_groups:
         if len(cards) >= k: break
         if feat not in X_row.columns:  continue
-        card = _render_climate_card(feat, float(X_row[feat].iloc[0]), sc)
+        card = _render_climate_card(feat, float(X_row[feat].iloc[0]), sc, risk_score)
         if card:
             cards.append(card)
     return cards
@@ -1029,7 +1038,7 @@ def _predict_at_date(
 
     # ── 오늘(offset 0) 만: 분석/리포트 카드 & 한줄요약 ──
     if include_report:
-        climate_cards = _select_climate_cards(ebm, X, k=3)
+        climate_cards = _select_climate_cards(ebm, X, risk_score, k=3)
         lag_card = _select_lag_card(ebm, X, d, feats["self_lag1"], feats["self_lag2"])
         ctm_card = _select_ctm_card(d, e_used, risk_score,
                                     feats.get("temp_mean_3"), feats.get("rh_mean_3"))
