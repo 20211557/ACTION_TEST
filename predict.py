@@ -833,6 +833,45 @@ def _select_ctm_card(d, e, risk_score, temp_mean_3, rh_mean_3):
     }
 
 
+def _select_evaporation_card(feats, risk_score, existing_cards):
+    """E_EVAP 카드 — 결정론적 분기 (EBM 모델이 evaporation 미학습이라 우회).
+
+    엑셀 룰: val < baseline AND score > 0.
+    'score > 0' 을 직접 평가할 수 없으므로 대체 게이트 사용:
+      - Risk_score >= B1 (= 안전 등급 초과: 0.03)
+        → "전체 위험도가 의미있는 수준일 때만 카드 노출" 의 정신을 유지
+
+    Group E 가 이미 다른 카드(E_LOW 등) 로 대표되어 있으면 표시 안 함
+    → '그룹 내 1개 카드' 원칙 준수.
+    """
+    if risk_score < B1:
+        return None
+    if any(c.get("group") == "E" for c in existing_cards):
+        return None
+    feat = "evaporation_mean_3"
+    v = feats.get(feat)
+    if v is None or pd.isna(v):
+        return None
+    base = BASELINES.get(feat, 3.65)
+    if v >= base:
+        return None
+    deficit_ratio = float((base - v) / base)   # 0~1, 평년 대비 부족률
+    return {
+        "type": "weather",
+        "group": "E",
+        "group_label": "일사/일조",
+        "subtitle": "증발량",
+        "title": "수분이 잘 안 날아가요",
+        "message": f"증발량이 {float(v):.1f}로 적어요. 논 표면 수분이 오래 남아 있어요.",
+        "condition_code": "E_EVAP",
+        "feature": feat,
+        "value": float(v),
+        "contribution": deficit_ratio,   # proxy (평년 대비 부족률) — EBM score 아님
+        "window_days": 3,
+        "deterministic": True,            # EBM ranking 아닌 결정론적 trigger 명시
+    }
+
+
 def _render_summary(p_ebm, e, grade_trend, growth_stage, top_feat_subtitle):
     """한줄요약_매트릭스 시트의 6개 분기 + [생육시기_위험설명] 치환."""
     stage_desc = GROWTH_STAGE_DESC.get(growth_stage, growth_stage)
@@ -998,6 +1037,10 @@ def _predict_at_date(
         cards = list(climate_cards)
         if lag_card: cards.append(lag_card)
         if ctm_card: cards.append(ctm_card)
+        # E_EVAP — EBM 모델이 evaporation 미학습이라 결정론적 분기로 추가
+        # (val<baseline AND Risk_score>=B1, Group E 미선점일 때만)
+        evap_card = _select_evaporation_card(feats, risk_score, cards)
+        if evap_card: cards.append(evap_card)
         for i, c in enumerate(cards, 1):
             c["no"] = i
 
