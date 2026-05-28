@@ -947,12 +947,17 @@ def _predict_at_date(
     past_gdd_sum=0.0,
     self_lag1=0.0,
     self_lag2=0.0,
+    lag_table=None,
     include_report=True,
 ):
     """daily_df 에서 pred_date 로 끝나는 3/7/15일 윈도우로 단일 예측.
 
     include_report=True  → 카드/요약/생육시기 등 분석 필드 포함 (오늘 예측용)
     include_report=False → 위험 등급·위험도·Risk_score 등 결과 필드만 (예보용)
+
+    lag_table: NCPMS 예찰 테이블 {date_str: {region: rate}}.
+      pred_date 가 예찰일과 일치하면 그날 실측 피해율을 observed_damage_rate
+      로 출력. 일치 안 하거나 데이터 없으면 0.0.
     """
     # 1. 각 윈도우 (pred_date 로 끝나는 W일) feature 계산
     feats = {"지역": info["region"]}
@@ -1002,6 +1007,13 @@ def _predict_at_date(
 
     ctm_ratio = ((1 - ALPHA) * d * e_used) / risk_score if risk_score > 0 else 0.0
 
+    # NCPMS 예찰일 일치 시 실측 피해율 (아니면 0.0)
+    observed_damage_rate = 0.0
+    if lag_table:
+        observed_damage_rate = float(
+            lag_table.get(pred_date.isoformat(), {}).get(info["region"], 0.0)
+        )
+
     # ── 모든 offset 에 공통: 결과 필드 + 메트릭 + 입력 ──
     result = {
         "target_date": pred_date.isoformat(),
@@ -1032,6 +1044,7 @@ def _predict_at_date(
             "gdd_15": float(feats["gdd_15"]),
             "gdd_cum": float(feats["gdd_cum"]),
             "season_idx": int(feats["season_idx"]),
+            "observed_damage_rate": observed_damage_rate,  # NCPMS 예찰일 실측 (예찰일 아니면 0)
         },
     }
 
@@ -1069,6 +1082,7 @@ def predict_window_series(
     self_lag1=0.0,
     self_lag2=0.0,
     prev_today_grade=None,    # 어제 배치의 '오늘' 등급 (offset 0 등급변화 계산용)
+    lag_table=None,           # NCPMS 예찰 테이블 (main 이 빌드 후 전달)
     verbose=True,
 ):
     """
@@ -1176,6 +1190,7 @@ def predict_window_series(
                 daily_df, pred_date, info, meta, ebm,
                 past_gdd_sum=past_gdd_sum_offset,
                 self_lag1=self_lag1, self_lag2=self_lag2,
+                lag_table=lag_table,
                 include_report=is_today,
             )
             r["offset_days"] = offset
@@ -1408,6 +1423,7 @@ def init_firebase():
 # ═══════════════════════════════════════════════════════════════════════
 def main():
     import time
+    from ncpms_lag import build_lag_table, resolve_lags
     init_firebase()
 
     output_dir = os.path.join("public", "regions")
@@ -1415,6 +1431,24 @@ def main():
 
     target_sido_list = list_sido()
     print(f"🎯 오늘 연산할 광역단체 수: {len(target_sido_list)}개")
+
+    # NCPMS self_lag 테이블 (배치 시작 시 1회 빌드, 전 지역 공유)
+    # API 키는 환경변수 NCPMS_API_KEY 에서만 읽음 (코드에 하드코딩 X).
+    # GitHub Actions: Settings → Secrets → NCPMS_API_KEY 등록 후
+    #                 workflow yml 에서 env: NCPMS_API_KEY: ${{ secrets.NCPMS_API_KEY }}
+    today = date.today()
+    ncpms_api_key = os.getenv("NCPMS_API_KEY")
+    if ncpms_api_key:
+        print(f"🦠 NCPMS self_lag 테이블 빌드 (year={today.year})...")
+        try:
+            lag_table = build_lag_table(today.year, api_key=ncpms_api_key, verbose=False)
+            print(f"   → 회차 {len(lag_table)}개 적재")
+        except Exception as e:
+            print(f"   ⚠️ NCPMS 빌드 실패 → self_lag=0 으로 진행: {e}")
+            lag_table = {}
+    else:
+        print("⚠️ NCPMS_API_KEY 미설정 → self_lag=0 으로 진행")
+        lag_table = {}
 
     # 모델 1회 미리 로드 (전 지역 공유)
     _load_models()
@@ -1426,7 +1460,11 @@ def main():
             print(f"⏭️ [{sido}] 학습 데이터 미포함 → skip")
             continue
 
-        print(f"\n🌾 [{sido}] 16일 슬라이딩 윈도우 예측 시작...")
+        # 지역별 self_lag1 / self_lag2 (오늘 기준 직전 2개 조사일자) — 16일 전체에 동일 적용
+        lag1, lag2 = resolve_lags(lag_table, info["region"], today)
+
+        print(f"\n🌾 [{sido}] 16일 슬라이딩 윈도우 예측 시작 "
+              f"(lag1={lag1:.3f}, lag2={lag2:.3f})...")
         try:
             file_path = os.path.join(output_dir, f"{sido}.json")
 
@@ -1446,6 +1484,8 @@ def main():
 
             result = predict_window_series(
                 sido=sido, n_future=15,
+                self_lag1=lag1, self_lag2=lag2,
+                lag_table=lag_table,
                 prev_today_grade=prev_grade,
                 verbose=False,
             )
