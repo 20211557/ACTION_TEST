@@ -56,6 +56,7 @@ DAILY_VARS = [
     # 운영 시점 forecast API 의 0_to_10cm 와 깊이 3cm 차이가 있으나
     # 6~9월 전국 median 기준선 용도로는 충분히 근사 가능.
     "soil_moisture_0_to_7cm_mean",
+    "et0_fao_evapotranspiration",
 ]
 
 START = "2014-05-18"
@@ -138,7 +139,8 @@ def filter_summer(samples):
 def main():
     # 지역별로 fetch → 변수·윈도우별 표본 누적
     bucket = {f"{var}_{W}": [] for var in ["rh_mean", "rain_sum", "sunshine_sum",
-                                            "soil_moisture_mean", "soil_temp_mean"]
+                                            "soil_moisture_mean", "soil_temp_mean",
+                                            "evaporation_mean"]
                                  for W in WINDOWS}
     for region, (lat, lon) in LEARN_REGIONS.items():
         try:
@@ -177,6 +179,12 @@ def main():
                 rolling_window_values(daily, "soil_temperature_0_to_7cm_mean", W, "mean")
             )
             bucket[f"soil_temp_mean_{W}"].extend(samples)
+
+            # evaporation_mean (FAO ET0, mm/day, W일 평균)
+            samples = filter_summer(
+                rolling_window_values(daily, "et0_fao_evapotranspiration", W, "mean")
+            )
+            bucket[f"evaporation_mean_{W}"].extend(samples)
 
         # rate-limit 완화
         time.sleep(2.5)

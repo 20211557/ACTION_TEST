@@ -133,6 +133,7 @@ class OpenMeteoMultiWindowExtractor:
                 "shortwave_radiation_sum",
                 "soil_temperature_0_to_7cm_mean",
                 "soil_moisture_0_to_10cm_mean",
+                "et0_fao_evapotranspiration",
             ]),
             "forecast_days": self.fetch_days,
             "timezone": "auto",
@@ -159,6 +160,7 @@ class OpenMeteoMultiWindowExtractor:
                 "solar_radiation":   d["shortwave_radiation_sum"],
                 "soil_temp":         d["soil_temperature_0_to_7cm_mean"],
                 "soil_moisture":     d["soil_moisture_0_to_10cm_mean"],
+                "evaporation":       d["et0_fao_evapotranspiration"],
             })
             print(f"✅ 일별 데이터 수신: {len(self.daily_df)}일")
             return self.daily_df
@@ -188,6 +190,7 @@ class OpenMeteoMultiWindowExtractor:
             "solar_radiation":   np.clip(16 + 8 * np.sin(x / 4) + rng.normal(0, 1.5, n), 0, None),
             "soil_temp":         14 + 3 * np.sin(x / 4) + rng.normal(0, 0.4, n),
             "soil_moisture":     np.clip(0.26 + 0.04 * np.sin(x / 3) + rng.normal(0, 0.02, n), 0, 1),
+            "evaporation":       np.clip(2.5 + 1.0 * np.sin(x / 4) + rng.normal(0, 0.3, n), 0, None),
         })
         print(f"📊 모의 일별 데이터 생성: {len(self.daily_df)}일")
         return self.daily_df
@@ -261,6 +264,10 @@ class OpenMeteoMultiWindowExtractor:
         out[f"sunshine_sum_{W}"] = s["sunshine_duration"].sum() / 360
         out[f"solar_sum_{W}"]    = s["solar_radiation"].sum()
         out[f"solar_max_{W}"]    = s["solar_radiation"].max()
+
+        # 증발산 (FAO ET0, mm/day) — W일 평균
+        if "evaporation" in s.columns:
+            out[f"evaporation_mean_{W}"] = s["evaporation"].mean()
 
         # 토양
         # ⚠️ soil_moisture 학습 데이터 단위 매칭:

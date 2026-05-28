@@ -105,6 +105,7 @@ DAILY_VARS = [
     "wind_speed_10m_mean", "wind_speed_10m_max", "wind_direction_10m_dominant",
     "precipitation_sum", "sunshine_duration", "shortwave_radiation_sum",
     "soil_temperature_0_to_7cm_mean", "soil_moisture_0_to_10cm_mean",
+    "et0_fao_evapotranspiration",
 ]
 
 # ─── 회의록 11차 사양 ─────────────────────────────────────────────────
@@ -182,9 +183,11 @@ FEATURE_GROUP = {
     'sunshine_sum_3':    ('E', '일사/일조',    3,  'h',   'DOWN', '일조시간'),
     'sunshine_sum_7':    ('E', '일사/일조',    7,  'h',   'DOWN', '일조시간'),
     'sunshine_sum_15':   ('E', '일사/일조',    15, 'h',   'DOWN', '일조시간'),
-    # ⚠️ evaporation_mean_* : 현재 EBM 모델 (ebm_final.pkl) 학습에 미포함.
-    # → ebm.explain_local() 에 이 feature 가 나오지 않으므로 _select_climate_cards
-    #   에서 후보로 선정되지 않음 → E_EVAP 카드는 모델 재학습 후 활성화됨.
+    # evaporation_mean_* (FAO ET0, mm/day) : Open-Meteo et0_fao_evapotranspiration
+    # 으로 fetch + window 평균 산출 — feats dict 에 값은 들어옴.
+    # ⚠️ 단, 현재 EBM 모델 (ebm_final.pkl) 학습엔 미포함 → reindex 단계에서 drop →
+    #    ebm.explain_local() 에 안 나타남 → _select_climate_cards 후보 X →
+    #    E_EVAP 카드는 모델 재학습 후 자동 활성화됨.
     'evaporation_mean_3':  ('E', '일사/일조',  3,  'mm',  'DOWN', '증발량'),
     'evaporation_mean_7':  ('E', '일사/일조',  7,  'mm',  'DOWN', '증발량'),
     'evaporation_mean_15': ('E', '일사/일조',  15, 'mm',  'DOWN', '증발량'),
@@ -210,9 +213,8 @@ BASELINES = {
     'sunshine_sum_3':        279.2,    'sunshine_sum_7':        635.6,    'sunshine_sum_15':       1347.7,
     'soil_moisture_mean_3':   22.90,   'soil_moisture_mean_7':   22.72,   'soil_moisture_mean_15':   22.36,
     'soil_temp_mean_3':       24.07,   'soil_temp_mean_7':       24.06,   'soil_temp_mean_15':       24.03,
-    # evaporation_mean_* : 한국 여름철 FAO 기준 증발산량 추정 (3~4 mm/day).
-    # 모델 재학습 시 정확한 중앙값으로 교체 권장 (compute_baselines.py 확장).
-    'evaporation_mean_3':      3.5,    'evaporation_mean_7':      3.5,    'evaporation_mean_15':      3.5,
+    # evaporation_mean_* : 2014~2023 6-9월 FAO ET0 중앙값 (n=18,300 표본/feature).
+    'evaporation_mean_3':     3.63,    'evaporation_mean_7':     3.65,    'evaporation_mean_15':     3.67,
 }
 
 GROWTH_STAGE_DESC = {
@@ -262,6 +264,7 @@ def _build_daily_df_from_response(d):
         "solar_radiation": d.get("shortwave_radiation_sum"),
         "soil_temp": d.get("soil_temperature_0_to_7cm_mean"),
         "soil_moisture": d.get("soil_moisture_0_to_10cm_mean"),
+        "evaporation": d.get("et0_fao_evapotranspiration"),
     })
 
 
