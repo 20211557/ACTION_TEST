@@ -928,14 +928,12 @@ def _predict_at_date(
 
     ctm_ratio = ((1 - ALPHA) * d * e_used) / risk_score if risk_score > 0 else 0.0
 
-    # ── 모든 offset 에 공통: 결과 필드 + 메트릭 + 입력 + 호환 키 ──
+    # ── 모든 offset 에 공통: 결과 필드 + 메트릭 + 입력 ──
     result = {
-        # 필수 필드 (시도는 상위 dict, 기준_날짜·위험_등급·위험도·Risk_score 는 여기)
-        "기준_날짜": pred_date.isoformat(),
+        "target_date": pred_date.isoformat(),
         "기준_날짜_표시": f"{pred_date.month}월 {pred_date.day}일",
-        "위험_등급": GRADE_NAME[final_grade],
-        "위험_등급_코드": int(final_grade),
-        "위험도": situation,
+        "grade": int(final_grade),
+        "grade_name": GRADE_NAME[final_grade],
         "Risk_score": float(risk_score),
 
         "metrics": {
@@ -961,14 +959,9 @@ def _predict_at_date(
             "gdd_cum": float(feats["gdd_cum"]),
             "season_idx": int(feats["season_idx"]),
         },
-        # 호환 키 (구 JSON 소비자용)
-        "target_date": pred_date.isoformat(),
-        "grade": int(final_grade),
-        "grade_name": GRADE_NAME[final_grade],
-        "Risk_Score": float(risk_score),
     }
 
-    # ── 오늘(offset 0) 만: 분석/리포트 카드 & 한줄요약 & 생육시기 ──
+    # ── 오늘(offset 0) 만: 분석/리포트 카드 & 한줄요약 ──
     if include_report:
         climate_cards = _select_climate_cards(ebm, X, k=3)
         lag_card = _select_lag_card(ebm, X, d, feats["self_lag1"], feats["self_lag2"])
@@ -981,12 +974,9 @@ def _predict_at_date(
         for i, c in enumerate(cards, 1):
             c["no"] = i
 
-        growth_stage = _growth_stage(pred_date)
         result.update({
             "summary": None,                # 상위 루프에서 grade_trend 산출 후 채움
             "summary_code": None,
-            "growth_stage": growth_stage,
-            "growth_stage_desc": GROWTH_STAGE_DESC.get(growth_stage, growth_stage),
             "grade_change": None,           # 상위 루프에서 prev_grade 와 비교 후 채움
             "cards": cards,
         })
@@ -1117,15 +1107,17 @@ def predict_window_series(
             # prev_today_grade 는 main() 이 직전 JSON 파일에서 읽어 전달.
             # 없으면 (= 첫 실행) → null, 한줄요약 추세는 'same' 처리.
             if is_today:
-                curr_g = r["위험_등급_코드"]
+                curr_g = r["grade"]
                 r["grade_change"] = (_grade_change_label(prev_today_grade, curr_g)
                                      if prev_today_grade is not None else None)
                 trend = (r["grade_change"]["direction"]
                          if r["grade_change"] else 'same')
                 top_subtitle = r["cards"][0]["subtitle"] if r.get("cards") else None
+                # growth_stage 는 summary 텍스트에만 사용 (JSON 출력엔 포함 X)
+                growth_stage = _growth_stage(pred_date)
                 sc, sm = _render_summary(
                     r["metrics"]["P_EBM"], r["metrics"]["E"],
-                    trend, r["growth_stage"], top_subtitle,
+                    trend, growth_stage, top_subtitle,
                 )
                 r["summary_code"] = sc
                 r["summary"] = sm
@@ -1135,18 +1127,16 @@ def predict_window_series(
                 print(f"  · +{offset:2d}일 ({pred_date}): "
                       f"Risk={r['Risk_score']:.4f}  "
                       f"E={r['metrics']['E']:.4f}  "
-                      f"grade={r['위험_등급_코드']} {r['위험_등급']}")
+                      f"grade={r['grade']} {r['grade_name']}")
         except Exception as e:
             predictions.append({
                 "offset_days": offset,
-                "기준_날짜": pred_date.isoformat(),
                 "target_date": pred_date.isoformat(),
                 "error": str(e),
             })
             if verbose: print(f"  · +{offset:2d}일 ({pred_date}): ❌ {e}")
 
     return {
-        "시도": sido,
         "sido": sido,
         "region": info["region"],
         "base_date": today.isoformat(),
@@ -1362,7 +1352,8 @@ def main():
         try:
             file_path = os.path.join(output_dir, f"{sido}.json")
 
-            # 어제 배치 JSON 의 'offset 0 위험_등급_코드' 를 읽어 등급변화 산출에 활용
+            # 어제 배치 JSON 의 'offset 0 grade' 를 읽어 등급변화 산출에 활용.
+            # 구 스키마(위험_등급_코드) 도 fallback 으로 호환.
             prev_grade = None
             if os.path.exists(file_path):
                 try:
@@ -1370,7 +1361,7 @@ def main():
                         prev = json.load(f)
                     for p in prev.get("predictions", []):
                         if p.get("offset_days") == 0 and "error" not in p:
-                            prev_grade = p.get("위험_등급_코드", p.get("grade"))
+                            prev_grade = p.get("grade", p.get("위험_등급_코드"))
                             break
                 except Exception as ee:
                     print(f"   ⚠️ 이전 JSON 파싱 실패 (무시): {ee}")
